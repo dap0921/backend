@@ -25,29 +25,43 @@ const clearResetToken = async (userId, tokenHash) => {
 };
 
 const getEmailConfiguration = () => {
-  const { BREVO_API_KEY, BREVO_SENDER_EMAIL, FRONTEND_URL } = process.env;
+  const {
+    BREVO_API_KEY: rawApiKey,
+    BREVO_SENDER_EMAIL: rawSenderEmail,
+    FRONTEND_URL: rawFrontendUrl,
+    BREVO_SENDER_NAME
+  } = process.env;
 
-  if (!BREVO_API_KEY || !BREVO_SENDER_EMAIL || !FRONTEND_URL) {
+  const apiKey = String(rawApiKey || '').trim();
+  const senderEmail = String(rawSenderEmail || '').trim();
+  const frontendUrl = String(rawFrontendUrl || '').trim();
+
+  if (!apiKey || !senderEmail || !frontendUrl) {
     return null;
   }
 
-  const frontendUrl = FRONTEND_URL.replace(/\/+$/, '');
-  const parsedUrl = new URL(frontendUrl);
+  let parsedUrl;
+
+  try {
+    parsedUrl = new URL(frontendUrl);
+  } catch (error) {
+    return null;
+  }
 
   if (
     !['http:', 'https:'].includes(parsedUrl.protocol) ||
-    parsedUrl.pathname !== '/' ||
     parsedUrl.search ||
-    parsedUrl.hash
+    parsedUrl.hash ||
+    parsedUrl.pathname.replace(/\/+$/, '') !== '' && parsedUrl.pathname !== '/'
   ) {
     return null;
   }
 
   return {
-    apiKey: BREVO_API_KEY,
-    senderEmail: BREVO_SENDER_EMAIL,
-    senderName: process.env.BREVO_SENDER_NAME || 'Expense Tracker',
-    frontendUrl
+    apiKey,
+    senderEmail,
+    senderName: (BREVO_SENDER_NAME || 'Expense Tracker').trim() || 'Expense Tracker',
+    frontendUrl: parsedUrl.origin
   };
 };
 
