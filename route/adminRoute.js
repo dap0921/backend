@@ -13,8 +13,8 @@ import adminMiddleware from '../middleware/adminMiddleware.js';
 
 const router = express.Router();
 
-// All admin routes require admin authentication.
-router.use(adminMiddleware);
+// Admin authentication applies only to admin endpoints.
+router.use('/admin', adminMiddleware);
 
 router.get('/admin/users', getAllUsers);
 router.get('/admin/users/:id', getUserDetailsByAdmin);
