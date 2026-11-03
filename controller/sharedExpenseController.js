@@ -677,18 +677,20 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
       });
     }
 
-    const giver = await userData
-      .findById(expense.paidBy)
-      .select('+razorpayAccountId');
-    const testRouteAccountId = process.env.RAZORPAY_TEST_ROUTE_ACCOUNT_ID?.trim();
-    const routeAccountId = credentials.keyId.startsWith('rzp_test_')
-      ? testRouteAccountId || giver?.razorpayAccountId
-      : giver?.razorpayAccountId;
+    const demoMode = credentials.keyId.startsWith('rzp_test_');
+    let routeAccountId = null;
 
-    if (!routeAccountId) {
-      return res.status(400).json({
-        message: 'The giver does not have a verified Razorpay Route linked account.'
-      });
+    if (!demoMode) {
+      const giver = await userData
+        .findById(expense.paidBy)
+        .select('+razorpayAccountId');
+      routeAccountId = giver?.razorpayAccountId;
+
+      if (!routeAccountId) {
+        return res.status(400).json({
+          message: 'The giver does not have a verified Razorpay Route linked account.'
+        });
+      }
     }
 
     const now = new Date();
@@ -701,6 +703,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
     if (pendingAttempt) {
       if (
         pendingAttempt.amountPaise !== amountPaise ||
+        pendingAttempt.demoMode !== demoMode ||
         pendingAttempt.razorpayAccountId !== routeAccountId
       ) {
         return res.status(409).json({
@@ -720,15 +723,18 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
     }
 
     const receipt = `sh_${expenseId.slice(-12)}_${now.getTime().toString(36)}`;
-    const order = await razorpayRequest('/orders', 'POST', credentials, {
+    const orderRequest = {
       amount: amountPaise,
       currency: 'INR',
       receipt,
       notes: {
         expenseId: expenseId.toString(),
         userId: currentUserId.toString()
-      },
-      transfers: [
+      }
+    };
+
+    if (!demoMode) {
+      orderRequest.transfers = [
         {
           account: routeAccountId,
           amount: amountPaise,
@@ -736,8 +742,15 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
           notes: { expenseId: expenseId.toString() },
           on_hold: false
         }
-      ]
-    });
+      ];
+    }
+
+    const order = await razorpayRequest(
+      '/orders',
+      'POST',
+      credentials,
+      orderRequest
+    );
 
     const transfer = Array.isArray(order.transfers)
       ? order.transfers[0]
@@ -746,22 +759,32 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
     if (
       !order.id ||
       Number(order.amount) !== amountPaise ||
-      !transfer?.id ||
-      (transfer.recipient || transfer.account) !== routeAccountId ||
-      Number(transfer.amount) !== amountPaise
+      (!demoMode && (
+        !transfer?.id ||
+        (transfer.recipient || transfer.account) !== routeAccountId ||
+        Number(transfer.amount) !== amountPaise
+      ))
     ) {
       return res.status(502).json({
-        message: 'Razorpay did not confirm the expected order transfer.'
+        message: demoMode
+          ? 'Razorpay did not confirm the expected test order.'
+          : 'Razorpay did not confirm the expected order transfer.'
       });
     }
 
-    expense.paymentAttempts.push({
+    const paymentAttempt = {
       userId: currentUserId,
       orderId: order.id,
       amountPaise,
-      razorpayAccountId: routeAccountId,
-      transferId: transfer.id
-    });
+      demoMode
+    };
+
+    if (!demoMode) {
+      paymentAttempt.razorpayAccountId = routeAccountId;
+      paymentAttempt.transferId = transfer.id;
+    }
+
+    expense.paymentAttempts.push(paymentAttempt);
     await expense.save();
 
     return res.status(201).json({
@@ -840,15 +863,24 @@ export const verifySharedExpensePayment = async (req, res) => {
     }
 
     if (
-      attempt.status === 'verified' &&
+      ['verified', 'demo_verified'].includes(attempt.status) &&
       attempt.paymentId === paymentId
     ) {
+      const currentSplit = expense.splits.find(
+        item => item.userId.toString() === currentUserId.toString()
+      );
+
       return res.status(200).json({
-        message: 'Payment was already verified and recorded.',
+        message: attempt.demoMode
+          ? 'Test payment was already verified. No real money was charged and the balance is unchanged.'
+          : 'Payment was already verified and recorded.',
         data: {
           expenseId,
           amountPaid: attempt.amountPaise / 100,
-          outstandingAmount: 0
+          outstandingAmount: currentSplit
+            ? getOutstandingCents(currentSplit) / 100
+            : null,
+          demoMode: attempt.demoMode
         }
       });
     }
@@ -900,7 +932,7 @@ export const verifySharedExpensePayment = async (req, res) => {
       }
 
       if (
-        currentAttempt.status === 'verified' &&
+        ['verified', 'demo_verified'].includes(currentAttempt.status) &&
         currentAttempt.paymentId === paymentId
       ) {
         return {
@@ -938,6 +970,19 @@ export const verifySharedExpensePayment = async (req, res) => {
         throw error;
       }
 
+      if (currentAttempt.demoMode) {
+        currentAttempt.paymentId = paymentId;
+        currentAttempt.status = 'demo_verified';
+        await currentExpense.save({ session });
+
+        return {
+          alreadyVerified: false,
+          demoMode: true,
+          expense: currentExpense,
+          attempt: currentAttempt
+        };
+      }
+
       split.settledAmount =
         (Math.round(Number(split.settledAmount || 0) * 100) + attempt.amountPaise) / 100;
       currentAttempt.paymentId = paymentId;
@@ -946,6 +991,7 @@ export const verifySharedExpensePayment = async (req, res) => {
 
       return {
         alreadyVerified: false,
+        demoMode: false,
         expense: currentExpense,
         attempt: currentAttempt
       };
@@ -957,14 +1003,19 @@ export const verifySharedExpensePayment = async (req, res) => {
     const outstandingPaise = getOutstandingCents(split);
 
     return res.status(200).json({
-      message: result.alreadyVerified
-        ? 'Payment was already verified and recorded.'
-        : 'Payment captured and transfer initiated to the giver.',
+      message: result.attempt.demoMode
+        ? 'Razorpay test payment verified. No real money was charged and the shared balance is unchanged.'
+        : result.alreadyVerified
+          ? 'Payment was already verified and recorded.'
+          : 'Payment captured and transfer initiated to the giver.',
       data: {
         expenseId,
         amountPaid: result.attempt.amountPaise / 100,
-        settledAmount: split.settledAmount,
-        outstandingAmount: outstandingPaise / 100
+        settledAmount: result.attempt.demoMode
+          ? undefined
+          : split.settledAmount,
+        outstandingAmount: outstandingPaise / 100,
+        demoMode: result.attempt.demoMode
       }
     });
   } catch (error) {

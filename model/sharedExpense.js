@@ -67,13 +67,17 @@ const sharedExpenseSchema = new mongoose.Schema(
               required: true,
               min: 100
             },
+            demoMode: {
+              type: Boolean,
+              default: false
+            },
             razorpayAccountId: {
               type: String,
-              required: true
+              required: false
             },
             transferId: {
               type: String,
-              required: true
+              required: false
             },
             paymentId: {
               type: String,
@@ -81,7 +85,7 @@ const sharedExpenseSchema = new mongoose.Schema(
             },
             status: {
               type: String,
-              enum: ['created', 'verified'],
+              enum: ['created', 'verified', 'demo_verified'],
               default: 'created'
             }
           },

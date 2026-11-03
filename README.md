@@ -26,10 +26,11 @@ Set `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` on the backend service in
 Render. Use a matching test-key pair while testing; never expose the secret in
 the frontend.
 
-For a shared test recipient, optionally set `RAZORPAY_TEST_ROUTE_ACCOUNT_ID`
-to its Test Mode linked-account ID. This override is used only when
-`RAZORPAY_KEY_ID` starts with `rzp_test_`. Live payments always use the
-expense giver's own account ID saved on their user record.
+When `RAZORPAY_KEY_ID` starts with `rzp_test_`, the backend creates a standard
+Razorpay test order without a Route transfer. A verified test payment is
+recorded as a demo attempt but does not change the shared expense balance; no
+real money is charged or paid to a giver. Live payments continue to require
+Route and each giver's own linked-account ID.
 
 Each expense giver must have a verified Razorpay Route linked account. Save the
 giver's linked-account ID on their user record with the admin-only endpoint:
