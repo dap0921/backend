@@ -12,6 +12,7 @@ import {
 } from '../controller/userDataController.js';
 import {
   requestPasswordReset,
+  resetPasswordWithCode,
   resetPassword
 } from '../controller/passwordResetController.js';
 
@@ -61,8 +62,9 @@ router.post(
 // User login
 router.post('/login', loginUser);
 
-// Password recovery routes are public; reset tokens authorize the password change.
+// Password recovery routes are public; the emailed code authorizes the password change.
 router.post('/forgot-password', passwordResetLimiter, requestPasswordReset);
+router.post('/reset-password', passwordResetLimiter, resetPasswordWithCode);
 router.post('/reset-password/:token', passwordResetLimiter, resetPassword);
 
 // Existing user routes

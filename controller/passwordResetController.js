@@ -1,26 +1,27 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import userData from '../model/user.js';
 
-const resetLinkMessage =
-  'If an account matches that email and role, a password reset link will be sent shortly.';
+const resetCodeMessage =
+  'If an account matches that email and role, a verification code will be sent shortly.';
 
 const hashToken = (token) =>
   createHash('sha256').update(token).digest('hex');
 
-const clearResetToken = async (userId, tokenHash) => {
+const clearResetCode = async (userId, codeHash) => {
   try {
     await userData.updateOne(
-      { _id: userId, passwordResetTokenHash: tokenHash },
+      { _id: userId, passwordResetCodeHash: codeHash },
       {
         $unset: {
-          passwordResetTokenHash: '',
-          passwordResetExpiresAt: ''
+          passwordResetCodeHash: '',
+          passwordResetCodeExpiresAt: '',
+          passwordResetCodeAttempts: ''
         }
       }
     );
   } catch (error) {
-    console.error('Failed to clear an unsent password reset token:', error.message);
+    console.error('Failed to clear an unsent password reset code:', error.message);
   }
 };
 
@@ -28,40 +29,20 @@ const getEmailConfiguration = () => {
   const {
     BREVO_API_KEY: rawApiKey,
     BREVO_SENDER_EMAIL: rawSenderEmail,
-    FRONTEND_URL: rawFrontendUrl,
     BREVO_SENDER_NAME
   } = process.env;
 
   const apiKey = String(rawApiKey || '').trim();
   const senderEmail = String(rawSenderEmail || '').trim();
-  const frontendUrl = String(rawFrontendUrl || '').trim();
 
-  if (!apiKey || !senderEmail || !frontendUrl) {
-    return null;
-  }
-
-  let parsedUrl;
-
-  try {
-    parsedUrl = new URL(frontendUrl);
-  } catch (error) {
-    return null;
-  }
-
-  if (
-    !['http:', 'https:'].includes(parsedUrl.protocol) ||
-    parsedUrl.search ||
-    parsedUrl.hash ||
-    parsedUrl.pathname.replace(/\/+$/, '') !== '' && parsedUrl.pathname !== '/'
-  ) {
+  if (!apiKey || !senderEmail) {
     return null;
   }
 
   return {
     apiKey,
     senderEmail,
-    senderName: (BREVO_SENDER_NAME || 'Expense Tracker').trim() || 'Expense Tracker',
-    frontendUrl: parsedUrl.origin
+    senderName: (BREVO_SENDER_NAME || 'Expense Tracker').trim() || 'Expense Tracker'
   };
 };
 
@@ -82,16 +63,11 @@ export const requestPasswordReset = async (req, res) => {
     });
   }
 
-  let emailConfig;
-  try {
-    emailConfig = getEmailConfiguration();
-  } catch (error) {
-    console.error('Invalid password reset email configuration:', error.message);
-  }
+  const emailConfig = getEmailConfiguration();
 
   if (!emailConfig) {
     console.error(
-      'Password reset is unavailable: configure BREVO_API_KEY, BREVO_SENDER_EMAIL, and FRONTEND_URL.'
+      'Password reset is unavailable: configure BREVO_API_KEY and BREVO_SENDER_EMAIL.'
     );
     return res.status(503).json({
       message: 'Password reset is temporarily unavailable. Please try again later.'
@@ -102,23 +78,28 @@ export const requestPasswordReset = async (req, res) => {
     const user = await userData.findOne({ email, role });
 
     if (!user) {
-      return res.status(202).json({ message: resetLinkMessage });
+      return res.status(202).json({ message: resetCodeMessage });
     }
 
-    const token = randomBytes(32).toString('hex');
-    const tokenHash = hashToken(token);
-    const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+    const code = String(randomInt(100000, 1000000));
+    const codeHash = await bcrypt.hash(code, 10);
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await userData.updateOne(
       { _id: user._id },
       {
         $set: {
-          passwordResetTokenHash: tokenHash,
-          passwordResetExpiresAt: expiresAt
+          passwordResetCodeHash: codeHash,
+          passwordResetCodeExpiresAt: expiresAt,
+          passwordResetCodeAttempts: 0
+        },
+        $unset: {
+          passwordResetTokenHash: '',
+          passwordResetExpiresAt: ''
         }
       }
     );
-    const resetUrl = `${emailConfig.frontendUrl}/reset-password/${token}`;
+
     let brevoResponse;
     try {
       brevoResponse = await fetch('https://api.brevo.com/v3/smtp/email', {
@@ -134,30 +115,121 @@ export const requestPasswordReset = async (req, res) => {
             email: emailConfig.senderEmail
           },
           to: [{ email: user.email, name: user.name }],
-          subject: 'Reset your Expense Tracker password',
-          textContent: `Use this link within 30 minutes to reset your password: ${resetUrl}`,
-          htmlContent: `<p>We received a request to reset your Expense Tracker password.</p><p><a href="${resetUrl}">Reset your password</a></p><p>This link expires in 30 minutes. If you did not request a reset, you can ignore this email.</p>`
+          subject: 'Your Expense Tracker password reset code',
+          textContent: `Your Expense Tracker password reset verification code is ${code}. It expires in 10 minutes. If you did not request this code, you can ignore this email.`,
+          htmlContent: `<p>We received a request to reset your Expense Tracker password.</p><p>Your verification code is:</p><p style="font-size:24px;font-weight:bold;letter-spacing:6px">${code}</p><p>This code expires in 10 minutes. If you did not request this code, you can ignore this email.</p>`
         }),
         signal: AbortSignal.timeout(10000)
       });
     } catch (error) {
       console.error('Brevo password reset email request failed:', error.message);
-      await clearResetToken(user._id, tokenHash);
-      return res.status(202).json({ message: resetLinkMessage });
+      await clearResetCode(user._id, codeHash);
+      return res.status(202).json({ message: resetCodeMessage });
     }
 
     if (!brevoResponse.ok) {
       console.error(
         `Brevo rejected a password reset email (HTTP ${brevoResponse.status}).`
       );
-      await clearResetToken(user._id, tokenHash);
+      await clearResetCode(user._id, codeHash);
     }
 
-    return res.status(202).json({ message: resetLinkMessage });
+    return res.status(202).json({ message: resetCodeMessage });
   } catch (error) {
     console.error('Password reset request failed:', error.message);
     return res.status(500).json({
       message: 'Unable to process the password reset request right now.'
+    });
+  }
+};
+
+export const resetPasswordWithCode = async (req, res) => {
+  const email =
+    typeof req.body.email === 'string'
+      ? req.body.email.trim().toLowerCase()
+      : '';
+  const { role, code, password } = req.body;
+
+  if (
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+    email.length > 254 ||
+    !['user', 'admin'].includes(role) ||
+    typeof code !== 'string' ||
+    !/^\d{6}$/.test(code) ||
+    typeof password !== 'string' ||
+    password.length < 6 ||
+    Buffer.byteLength(password, 'utf8') > 72
+  ) {
+    return res.status(400).json({
+      message: 'A valid email, verification code, account type, and password are required.'
+    });
+  }
+
+  try {
+    const user = await userData
+      .findOne({
+        email,
+        role,
+        passwordResetCodeExpiresAt: { $gt: new Date() },
+        passwordResetCodeAttempts: { $lt: 5 }
+      })
+      .select('+passwordResetCodeHash');
+
+    if (!user?.passwordResetCodeHash) {
+      return res.status(400).json({
+        message: 'The verification code is invalid or has expired.'
+      });
+    }
+
+    const codeMatches = await bcrypt.compare(code, user.passwordResetCodeHash);
+
+    if (!codeMatches) {
+      await userData.updateOne(
+        {
+          _id: user._id,
+          passwordResetCodeHash: user.passwordResetCodeHash,
+          passwordResetCodeExpiresAt: { $gt: new Date() },
+          passwordResetCodeAttempts: { $lt: 5 }
+        },
+        { $inc: { passwordResetCodeAttempts: 1 } }
+      );
+      return res.status(400).json({
+        message: 'The verification code is invalid or has expired.'
+      });
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const updatedUser = await userData.findOneAndUpdate(
+      {
+        _id: user._id,
+        passwordResetCodeHash: user.passwordResetCodeHash,
+        passwordResetCodeExpiresAt: { $gt: new Date() },
+        passwordResetCodeAttempts: { $lt: 5 }
+      },
+      {
+        $set: { password: passwordHash },
+        $unset: {
+          passwordResetCodeHash: '',
+          passwordResetCodeExpiresAt: '',
+          passwordResetCodeAttempts: ''
+        }
+      },
+      { new: true }
+    );
+
+    if (!updatedUser) {
+      return res.status(400).json({
+        message: 'The verification code is invalid or has expired.'
+      });
+    }
+
+    return res.status(200).json({
+      message: 'Password has been reset successfully.'
+    });
+  } catch (error) {
+    console.error('Password reset with verification code failed:', error.message);
+    return res.status(500).json({
+      message: 'Unable to reset the password right now.'
     });
   }
 };
