@@ -2,9 +2,6 @@ import { createHash, randomBytes, randomInt } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import userData from '../model/user.js';
 
-const resetCodeMessage =
-  'If an account matches that email and role, a verification code will be sent shortly.';
-
 const hashToken = (token) =>
   createHash('sha256').update(token).digest('hex');
 
@@ -81,7 +78,9 @@ export const requestPasswordReset = async (req, res) => {
 
     if (!user) {
       console.info('Password reset code request did not match an account.');
-      return res.status(202).json({ message: resetCodeMessage });
+      return res.status(404).json({
+        message: 'This email is not registered for the selected account type.'
+      });
     }
 
     const code = String(randomInt(100000, 1000000));
@@ -127,7 +126,9 @@ export const requestPasswordReset = async (req, res) => {
     } catch (error) {
       console.error('Brevo password reset email request failed:', error.message);
       await clearResetCode(user._id, codeHash);
-      return res.status(202).json({ message: resetCodeMessage });
+      return res.status(503).json({
+        message: 'Unable to send a verification code right now. Please try again later.'
+      });
     }
 
     if (!brevoResponse.ok) {
@@ -135,11 +136,16 @@ export const requestPasswordReset = async (req, res) => {
         `Brevo rejected a password reset email (HTTP ${brevoResponse.status}).`
       );
       await clearResetCode(user._id, codeHash);
+      return res.status(503).json({
+        message: 'Unable to send a verification code right now. Please try again later.'
+      });
     } else {
       console.info('Brevo accepted a password reset code email.');
     }
 
-    return res.status(202).json({ message: resetCodeMessage });
+    return res.status(200).json({
+      message: 'A verification code has been sent to your registered email address.'
+    });
   } catch (error) {
     console.error('Password reset request failed:', error.message);
     return res.status(500).json({
