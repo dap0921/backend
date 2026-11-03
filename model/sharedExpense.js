@@ -83,10 +83,6 @@ const sharedExpenseSchema = new mongoose.Schema(
               type: String,
               enum: ['created', 'verified'],
               default: 'created'
-            },
-            expiresAt: {
-              type: Date,
-              required: true
             }
           },
           { timestamps: true }

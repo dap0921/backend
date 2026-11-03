@@ -48,5 +48,6 @@ share:
 - `POST /api/shared/expenses/:expenseId/payments/verify`
 
 Razorpay Route access and linked-account onboarding must be approved by
-Razorpay. Orders are limited to the exact outstanding share, and active
-checkouts expire after 15 minutes.
+Razorpay. Orders are limited to the exact outstanding share. Pending orders
+are reused until verified; resolve an unpaid order before recording an offline
+repayment or changing its recipient.

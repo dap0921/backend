@@ -566,13 +566,12 @@ export const settleSharedExpense = async (req, res) => {
     const activePayment = expense.paymentAttempts.some(
       attempt =>
         attempt.userId.toString() === currentUserId.toString() &&
-        attempt.status === 'created' &&
-        attempt.expiresAt > new Date()
+        attempt.status === 'created'
     );
 
     if (activePayment) {
       return res.status(409).json({
-        message: 'A payment checkout is already in progress. Try again after it expires.'
+        message: 'A payment checkout is already pending. Reuse it before recording an offline repayment.'
       });
     }
 
@@ -696,8 +695,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
     const pendingAttempt = expense.paymentAttempts.find(
       attempt =>
         attempt.userId.toString() === currentUserId.toString() &&
-        attempt.status === 'created' &&
-        attempt.expiresAt > now
+        attempt.status === 'created'
     );
 
     if (pendingAttempt) {
@@ -706,7 +704,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
         pendingAttempt.razorpayAccountId !== routeAccountId
       ) {
         return res.status(409).json({
-          message: 'A previous checkout is still active. Wait for it to expire before starting another.'
+          message: 'A previous checkout is still pending with a different amount or recipient. Resolve it before starting another.'
         });
       }
 
@@ -721,13 +719,11 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
       });
     }
 
-    const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
     const receipt = `sh_${expenseId.slice(-12)}_${now.getTime().toString(36)}`;
     const order = await razorpayRequest('/orders', 'POST', credentials, {
       amount: amountPaise,
       currency: 'INR',
       receipt,
-      expire_by: Math.floor(expiresAt.getTime() / 1000),
       notes: {
         expenseId: expenseId.toString(),
         userId: currentUserId.toString()
@@ -764,8 +760,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
       orderId: order.id,
       amountPaise,
       razorpayAccountId: routeAccountId,
-      transferId: transfer.id,
-      expiresAt
+      transferId: transfer.id
     });
     await expense.save();
 
