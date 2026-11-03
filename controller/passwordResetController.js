@@ -63,6 +63,8 @@ export const requestPasswordReset = async (req, res) => {
     });
   }
 
+  console.info('Password reset code request received.');
+
   const emailConfig = getEmailConfiguration();
 
   if (!emailConfig) {
@@ -78,6 +80,7 @@ export const requestPasswordReset = async (req, res) => {
     const user = await userData.findOne({ email, role });
 
     if (!user) {
+      console.info('Password reset code request did not match an account.');
       return res.status(202).json({ message: resetCodeMessage });
     }
 
@@ -132,6 +135,8 @@ export const requestPasswordReset = async (req, res) => {
         `Brevo rejected a password reset email (HTTP ${brevoResponse.status}).`
       );
       await clearResetCode(user._id, codeHash);
+    } else {
+      console.info('Brevo accepted a password reset code email.');
     }
 
     return res.status(202).json({ message: resetCodeMessage });
