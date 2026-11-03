@@ -10,11 +10,25 @@ import {
   getProfile,
   updateProfile
 } from '../controller/userDataController.js';
+import {
+  requestPasswordReset,
+  resetPassword
+} from '../controller/passwordResetController.js';
 
 import authMiddleware from '../middleware/authMiddleware.js';
 import multer from "multer";
 import { uploadProfileImage } from "../controller/profileImageController.js";
+import rateLimit from 'express-rate-limit';
 const router = express.Router();
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: {
+    message: 'Too many password reset requests. Please try again later.'
+  }
+});
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
@@ -46,6 +60,10 @@ router.post(
 
 // User login
 router.post('/login', loginUser);
+
+// Password recovery routes are public; reset tokens authorize the password change.
+router.post('/forgot-password', passwordResetLimiter, requestPasswordReset);
+router.post('/reset-password/:token', passwordResetLimiter, resetPassword);
 
 // Existing user routes
 router.get('/get-user', getUser);
