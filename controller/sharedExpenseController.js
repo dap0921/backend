@@ -681,8 +681,12 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
     const giver = await userData
       .findById(expense.paidBy)
       .select('+razorpayAccountId');
+    const testRouteAccountId = process.env.RAZORPAY_TEST_ROUTE_ACCOUNT_ID?.trim();
+    const routeAccountId = credentials.keyId.startsWith('rzp_test_')
+      ? testRouteAccountId || giver?.razorpayAccountId
+      : giver?.razorpayAccountId;
 
-    if (!giver?.razorpayAccountId) {
+    if (!routeAccountId) {
       return res.status(400).json({
         message: 'The giver does not have a verified Razorpay Route linked account.'
       });
@@ -699,7 +703,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
     if (pendingAttempt) {
       if (
         pendingAttempt.amountPaise !== amountPaise ||
-        pendingAttempt.razorpayAccountId !== giver.razorpayAccountId
+        pendingAttempt.razorpayAccountId !== routeAccountId
       ) {
         return res.status(409).json({
           message: 'A previous checkout is still active. Wait for it to expire before starting another.'
@@ -730,7 +734,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
       },
       transfers: [
         {
-          account: giver.razorpayAccountId,
+          account: routeAccountId,
           amount: amountPaise,
           currency: 'INR',
           notes: { expenseId: expenseId.toString() },
@@ -747,7 +751,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
       !order.id ||
       Number(order.amount) !== amountPaise ||
       !transfer?.id ||
-      (transfer.recipient || transfer.account) !== giver.razorpayAccountId ||
+      (transfer.recipient || transfer.account) !== routeAccountId ||
       Number(transfer.amount) !== amountPaise
     ) {
       return res.status(502).json({
@@ -759,7 +763,7 @@ export const createSharedExpensePaymentOrder = async (req, res) => {
       userId: currentUserId,
       orderId: order.id,
       amountPaise,
-      razorpayAccountId: giver.razorpayAccountId,
+      razorpayAccountId: routeAccountId,
       transferId: transfer.id,
       expiresAt
     });
