@@ -55,6 +55,51 @@ export const getAllUsers = async (req, res) => {
   }
 };
 
+export const setUserRazorpayAccount = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const razorpayAccountId = req.body?.razorpayAccountId?.trim();
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ message: 'Invalid user ID.' });
+    }
+
+    if (
+      typeof razorpayAccountId !== 'string' ||
+      !/^acc_[A-Za-z0-9]+$/.test(razorpayAccountId)
+    ) {
+      return res.status(400).json({
+        message: 'A valid Razorpay Route linked-account ID is required.'
+      });
+    }
+
+    const user = await userData
+      .findByIdAndUpdate(
+        id,
+        { $set: { razorpayAccountId } },
+        { new: true, runValidators: true }
+      )
+      .select('+razorpayAccountId -password');
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    return res.status(200).json({
+      message: 'Razorpay Route account saved for user.',
+      data: {
+        userId: user._id,
+        razorpayAccountId: user.razorpayAccountId
+      }
+    });
+  } catch (error) {
+    console.error('Set user Razorpay account error:', error);
+    return res.status(500).json({
+      message: 'Failed to save the Razorpay Route account.'
+    });
+  }
+};
+
 // GET /admin/expenses
 export const getAllExpenses = async (req, res) => {
   try {

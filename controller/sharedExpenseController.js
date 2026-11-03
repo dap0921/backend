@@ -3,11 +3,65 @@ import mongoose from 'mongoose';
 import sharedGroup from '../model/sharedGroup.js';
 import userData from '../model/user.js';
 import sharedExpense from '../model/sharedExpense.js';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const getCurrentUserId = (req) => req.user?.id || req.user?._id;
 
 const isValidObjectId = (id) =>
   mongoose.Types.ObjectId.isValid(id);
+
+const getRazorpayCredentials = () => {
+  const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+  const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+
+  return keyId && keySecret ? { keyId, keySecret } : null;
+};
+
+const razorpayRequest = async (path, method, credentials, body) => {
+  const response = await fetch(`https://api.razorpay.com/v1${path}`, {
+    method,
+    headers: {
+      Authorization: `Basic ${Buffer.from(
+        `${credentials.keyId}:${credentials.keySecret}`
+      ).toString('base64')}`,
+      'Content-Type': 'application/json'
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
+  });
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    const error = new Error(
+      data.error?.description || 'Razorpay could not process the request.'
+    );
+    error.statusCode = response.status === 401 ? 503 : 502;
+    throw error;
+  }
+
+  return data;
+};
+
+const getOutstandingCents = (split) =>
+  Math.max(
+    0,
+    Math.round(Number(split.amountOwed) * 100) -
+      Math.round(Number(split.settledAmount || 0) * 100)
+  );
+
+const verifyRazorpaySignature = (orderId, paymentId, signature, secret) => {
+  if (typeof signature !== 'string' || !/^[a-f\d]{64}$/i.test(signature)) {
+    return false;
+  }
+
+  const expected = createHmac('sha256', secret)
+    .update(`${orderId}|${paymentId}`)
+    .digest();
+  const received = Buffer.from(signature, 'hex');
+
+  return received.length === expected.length &&
+    timingSafeEqual(received, expected);
+};
 
 // Create a group
 export const createGroup = async (req, res) => {
@@ -509,6 +563,19 @@ export const settleSharedExpense = async (req, res) => {
       });
     }
 
+    const activePayment = expense.paymentAttempts.some(
+      attempt =>
+        attempt.userId.toString() === currentUserId.toString() &&
+        attempt.status === 'created' &&
+        attempt.expiresAt > new Date()
+    );
+
+    if (activePayment) {
+      return res.status(409).json({
+        message: 'A payment checkout is already in progress. Try again after it expires.'
+      });
+    }
+
     const toCents = value => Math.round((value + Number.EPSILON) * 100);
 
     const owedCents = toCents(split.amountOwed);
@@ -543,6 +610,370 @@ export const settleSharedExpense = async (req, res) => {
     console.error('Settle shared expense error:', error);
     return res.status(500).json({
       message: 'Failed to record repayment.'
+    });
+  }
+};
+
+export const createSharedExpensePaymentOrder = async (req, res) => {
+  try {
+    const currentUserId = getCurrentUserId(req);
+    const { expenseId } = req.params;
+    const credentials = getRazorpayCredentials();
+
+    if (!currentUserId || !isValidObjectId(currentUserId)) {
+      return res.status(401).json({
+        message: 'Invalid authenticated user.'
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(expenseId)) {
+      return res.status(400).json({
+        message: 'Invalid expense ID.'
+      });
+    }
+
+    if (!credentials) {
+      return res.status(503).json({
+        message: 'Razorpay is not configured on the backend.'
+      });
+    }
+
+    const expense = await sharedExpense.findOne({
+      _id: expenseId,
+      $or: [
+        { paidBy: currentUserId },
+        { 'splits.userId': currentUserId }
+      ]
+    });
+
+    if (!expense) {
+      return res.status(404).json({
+        message: 'Expense not found or you are not a participant.'
+      });
+    }
+
+    if (expense.paidBy.toString() === currentUserId.toString()) {
+      return res.status(400).json({
+        message: 'The payer cannot repay themselves.'
+      });
+    }
+
+    const split = expense.splits.find(
+      item => item.userId.toString() === currentUserId.toString()
+    );
+
+    if (!split) {
+      return res.status(403).json({
+        message: 'Your share was not found in this expense.'
+      });
+    }
+
+    const amountPaise = getOutstandingCents(split);
+
+    if (amountPaise < 100) {
+      return res.status(400).json({
+        message: amountPaise === 0
+          ? 'Your share is already settled.'
+          : 'Razorpay orders must be at least ₹1.00.'
+      });
+    }
+
+    const giver = await userData
+      .findById(expense.paidBy)
+      .select('+razorpayAccountId');
+
+    if (!giver?.razorpayAccountId) {
+      return res.status(400).json({
+        message: 'The giver does not have a verified Razorpay Route linked account.'
+      });
+    }
+
+    const now = new Date();
+    const pendingAttempt = expense.paymentAttempts.find(
+      attempt =>
+        attempt.userId.toString() === currentUserId.toString() &&
+        attempt.status === 'created' &&
+        attempt.expiresAt > now
+    );
+
+    if (pendingAttempt) {
+      if (
+        pendingAttempt.amountPaise !== amountPaise ||
+        pendingAttempt.razorpayAccountId !== giver.razorpayAccountId
+      ) {
+        return res.status(409).json({
+          message: 'A previous checkout is still active. Wait for it to expire before starting another.'
+        });
+      }
+
+      return res.status(200).json({
+        message: 'Payment order retrieved successfully.',
+        data: {
+          keyId: credentials.keyId,
+          orderId: pendingAttempt.orderId,
+          amount: pendingAttempt.amountPaise,
+          currency: 'INR'
+        }
+      });
+    }
+
+    const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
+    const receipt = `sh_${expenseId.slice(-12)}_${now.getTime().toString(36)}`;
+    const order = await razorpayRequest('/orders', 'POST', credentials, {
+      amount: amountPaise,
+      currency: 'INR',
+      receipt,
+      expire_by: Math.floor(expiresAt.getTime() / 1000),
+      notes: {
+        expenseId: expenseId.toString(),
+        userId: currentUserId.toString()
+      },
+      transfers: [
+        {
+          account: giver.razorpayAccountId,
+          amount: amountPaise,
+          currency: 'INR',
+          notes: { expenseId: expenseId.toString() },
+          on_hold: false
+        }
+      ]
+    });
+
+    const transfer = Array.isArray(order.transfers)
+      ? order.transfers[0]
+      : order.transfers?.items?.[0];
+
+    if (
+      !order.id ||
+      Number(order.amount) !== amountPaise ||
+      !transfer?.id ||
+      (transfer.recipient || transfer.account) !== giver.razorpayAccountId ||
+      Number(transfer.amount) !== amountPaise
+    ) {
+      return res.status(502).json({
+        message: 'Razorpay did not confirm the expected order transfer.'
+      });
+    }
+
+    expense.paymentAttempts.push({
+      userId: currentUserId,
+      orderId: order.id,
+      amountPaise,
+      razorpayAccountId: giver.razorpayAccountId,
+      transferId: transfer.id,
+      expiresAt
+    });
+    await expense.save();
+
+    return res.status(201).json({
+      message: 'Payment order created successfully.',
+      data: {
+        keyId: credentials.keyId,
+        orderId: order.id,
+        amount: amountPaise,
+        currency: 'INR'
+      }
+    });
+  } catch (error) {
+    console.error('Create shared expense payment order error:', error.message);
+    return res.status(error.statusCode || 500).json({
+      message: error.statusCode
+        ? error.message
+        : 'Failed to create Razorpay payment order.'
+    });
+  }
+};
+
+export const verifySharedExpensePayment = async (req, res) => {
+  try {
+    const currentUserId = getCurrentUserId(req);
+    const { expenseId } = req.params;
+    const {
+      razorpay_payment_id: paymentId,
+      razorpay_order_id: orderId,
+      razorpay_signature: signature
+    } = req.body || {};
+    const credentials = getRazorpayCredentials();
+
+    if (!currentUserId || !isValidObjectId(currentUserId)) {
+      return res.status(401).json({
+        message: 'Invalid authenticated user.'
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(expenseId)) {
+      return res.status(400).json({
+        message: 'Invalid expense ID.'
+      });
+    }
+
+    if (
+      typeof paymentId !== 'string' ||
+      typeof orderId !== 'string' ||
+      typeof signature !== 'string'
+    ) {
+      return res.status(400).json({
+        message: 'Razorpay payment details are incomplete.'
+      });
+    }
+
+    if (!credentials) {
+      return res.status(503).json({
+        message: 'Razorpay is not configured on the backend.'
+      });
+    }
+
+    const expense = await sharedExpense.findOne({
+      _id: expenseId,
+      'paymentAttempts.orderId': orderId,
+      'paymentAttempts.userId': currentUserId
+    });
+    const attempt = expense?.paymentAttempts.find(
+      item =>
+        item.orderId === orderId &&
+        item.userId.toString() === currentUserId.toString()
+    );
+
+    if (!expense || !attempt) {
+      return res.status(404).json({
+        message: 'Payment order not found for this user and expense.'
+      });
+    }
+
+    if (
+      attempt.status === 'verified' &&
+      attempt.paymentId === paymentId
+    ) {
+      return res.status(200).json({
+        message: 'Payment was already verified and recorded.',
+        data: {
+          expenseId,
+          amountPaid: attempt.amountPaise / 100,
+          outstandingAmount: 0
+        }
+      });
+    }
+
+    if (attempt.status !== 'created') {
+      return res.status(409).json({
+        message: 'This payment order has already been processed.'
+      });
+    }
+
+    if (!verifyRazorpaySignature(orderId, paymentId, signature, credentials.keySecret)) {
+      return res.status(400).json({
+        message: 'Razorpay payment signature is invalid.'
+      });
+    }
+
+    const payment = await razorpayRequest(
+      `/payments/${encodeURIComponent(paymentId)}`,
+      'GET',
+      credentials
+    );
+
+    if (
+      payment.order_id !== orderId ||
+      payment.status !== 'captured' ||
+      payment.captured !== true ||
+      payment.currency !== 'INR' ||
+      Number(payment.amount) !== attempt.amountPaise
+    ) {
+      return res.status(400).json({
+        message: 'Razorpay has not confirmed the expected captured payment.'
+      });
+    }
+
+    const result = await mongoose.connection.transaction(async session => {
+      const currentExpense = await sharedExpense
+        .findById(expenseId)
+        .session(session);
+      const currentAttempt = currentExpense?.paymentAttempts.find(
+        item =>
+          item.orderId === orderId &&
+          item.userId.toString() === currentUserId.toString()
+      );
+
+      if (!currentExpense || !currentAttempt) {
+        const error = new Error('Payment order not found.');
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (
+        currentAttempt.status === 'verified' &&
+        currentAttempt.paymentId === paymentId
+      ) {
+        return {
+          alreadyVerified: true,
+          expense: currentExpense,
+          attempt: currentAttempt
+        };
+      }
+
+      const split = currentExpense.splits.find(
+        item => item.userId.toString() === currentUserId.toString()
+      );
+
+      if (!split) {
+        const error = new Error('Your share was not found in this expense.');
+        error.statusCode = 403;
+        throw error;
+      }
+
+      const outstandingPaise = getOutstandingCents(split);
+
+      if (attempt.amountPaise > outstandingPaise) {
+        const error = new Error('The outstanding balance changed before payment verification. Contact support before retrying.');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      const reusedPayment = await sharedExpense.exists({
+        'paymentAttempts.paymentId': paymentId
+      }).session(session);
+
+      if (reusedPayment) {
+        const error = new Error('This Razorpay payment has already been recorded.');
+        error.statusCode = 409;
+        throw error;
+      }
+
+      split.settledAmount =
+        (Math.round(Number(split.settledAmount || 0) * 100) + attempt.amountPaise) / 100;
+      currentAttempt.paymentId = paymentId;
+      currentAttempt.status = 'verified';
+      await currentExpense.save({ session });
+
+      return {
+        alreadyVerified: false,
+        expense: currentExpense,
+        attempt: currentAttempt
+      };
+    });
+
+    const split = result.expense.splits.find(
+      item => item.userId.toString() === currentUserId.toString()
+    );
+    const outstandingPaise = getOutstandingCents(split);
+
+    return res.status(200).json({
+      message: result.alreadyVerified
+        ? 'Payment was already verified and recorded.'
+        : 'Payment captured and transfer initiated to the giver.',
+      data: {
+        expenseId,
+        amountPaid: result.attempt.amountPaise / 100,
+        settledAmount: split.settledAmount,
+        outstandingAmount: outstandingPaise / 100
+      }
+    });
+  } catch (error) {
+    console.error('Verify shared expense payment error:', error.message);
+    return res.status(error.statusCode || 500).json({
+      message: error.statusCode
+        ? error.message
+        : 'Failed to verify Razorpay payment.'
     });
   }
 };

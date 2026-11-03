@@ -49,6 +49,52 @@ const splitSchema = new mongoose.Schema(
 
 const sharedExpenseSchema = new mongoose.Schema(
   {
+    paymentAttempts: {
+      type: [
+        new mongoose.Schema(
+          {
+            userId: {
+              type: mongoose.Schema.Types.ObjectId,
+              ref: 'userData',
+              required: true
+            },
+            orderId: {
+              type: String,
+              required: true
+            },
+            amountPaise: {
+              type: Number,
+              required: true,
+              min: 100
+            },
+            razorpayAccountId: {
+              type: String,
+              required: true
+            },
+            transferId: {
+              type: String,
+              required: true
+            },
+            paymentId: {
+              type: String,
+              default: null
+            },
+            status: {
+              type: String,
+              enum: ['created', 'verified'],
+              default: 'created'
+            },
+            expiresAt: {
+              type: Date,
+              required: true
+            }
+          },
+          { timestamps: true }
+        )
+      ],
+      default: []
+    },
+
     title: {
       type: String,
       required: [true, 'Expense title is required.'],

@@ -37,6 +37,13 @@ const userSchema = new mongoose.Schema(
   default: ""
 },
 
+    razorpayAccountId: {
+      type: String,
+      trim: true,
+      select: false,
+      match: /^acc_[A-Za-z0-9]+$/
+    },
+
     role: {
       type: String,
       enum: ["user", "admin"],

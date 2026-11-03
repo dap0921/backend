@@ -19,3 +19,29 @@ The frontend must be deployed at `FRONTEND_URL` and include the
 `/reset-password/:token` page. Do not put the Brevo API key in frontend
 environment variables or source code. Redeploy the backend after setting the
 environment variables.
+
+## Shared expense Razorpay payments
+
+Set `RAZORPAY_KEY_ID` and `RAZORPAY_KEY_SECRET` on the backend service in
+Render. Use a matching test-key pair while testing; never expose the secret in
+the frontend.
+
+Each expense giver must have a verified Razorpay Route linked account. Save the
+giver's linked-account ID on their user record with the admin-only endpoint:
+
+`PUT /admin/users/:id/razorpay-account`
+
+Send JSON `{ "razorpayAccountId": "acc_..." }` with an admin bearer token. Use
+the giver's user ID for `:id`. The ID must be the linked account created in the
+same Razorpay mode as the backend keys.
+
+The authenticated shared-expense endpoints create an INR order with a Route
+transfer to the giver and verify the captured payment before updating the
+share:
+
+- `POST /api/shared/expenses/:expenseId/payments/order`
+- `POST /api/shared/expenses/:expenseId/payments/verify`
+
+Razorpay Route access and linked-account onboarding must be approved by
+Razorpay. Orders are limited to the exact outstanding share, and active
+checkouts expire after 15 minutes.

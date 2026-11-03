@@ -6,7 +6,8 @@ import {
   getAllExpenses,
   getAdminStats,
   deleteUserByAdmin,
-  getUserDetailsByAdmin
+  getUserDetailsByAdmin,
+  setUserRazorpayAccount
 } from '../controller/adminController.js';
 
 import adminMiddleware from '../middleware/adminMiddleware.js';
@@ -18,6 +19,7 @@ router.use('/admin', adminMiddleware);
 
 router.get('/admin/users', getAllUsers);
 router.get('/admin/users/:id', getUserDetailsByAdmin);
+router.put('/admin/users/:id/razorpay-account', setUserRazorpayAccount);
 router.get('/admin/expenses', getAllExpenses);
 router.get('/admin/stats', getAdminStats);
 router.delete('/admin/users/:id', deleteUserByAdmin);

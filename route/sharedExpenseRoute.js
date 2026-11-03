@@ -10,7 +10,9 @@ import {
   getGroupById,
   createSharedExpense,
   getMySharedExpenses,
-  settleSharedExpense
+  settleSharedExpense,
+  createSharedExpensePaymentOrder,
+  verifySharedExpensePayment
 } from '../controller/sharedExpenseController.js';
 
 
@@ -49,6 +51,18 @@ router.post(
   '/api/shared/expenses/:expenseId/settle',
   authMiddleware,
   settleSharedExpense
+);
+
+router.post(
+  '/api/shared/expenses/:expenseId/payments/order',
+  authMiddleware,
+  createSharedExpensePaymentOrder
+);
+
+router.post(
+  '/api/shared/expenses/:expenseId/payments/verify',
+  authMiddleware,
+  verifySharedExpensePayment
 );
 
 export default router;
